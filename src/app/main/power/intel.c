@@ -365,6 +365,11 @@ static bool power_button_disabled(void) {
     return !gpio_get(&LID_SW_N) && gpio_get(&ACIN_N);
 }
 
+// Time AC must be continuously present before AC-restore powers on the system
+#ifndef AC_RESTORE_DELAY_MS
+#define AC_RESTORE_DELAY_MS 4000
+#endif
+
 void power_event(void) {
     // Check if the adapter line goes low
     static bool ac_send_sci = true;
@@ -404,6 +409,34 @@ void power_event(void) {
         }
     }
     ac_last = ac_new;
+
+    // AC restore: power on once AC has been continuously present for
+    // AC_RESTORE_DELAY_MS, to ride out transient power spikes. Armed at EC
+    // start (cold start on a battery-less unit) and re-armed whenever AC is
+    // lost; fires once per AC application, so a later OS shutdown while AC
+    // stays attached does not power the machine back on.
+    static bool ac_restore_armed = true;
+    static bool ac_restore_timing = false;
+    static systick_t ac_restore_start = 0;
+    if (ac_new) {
+        // AC absent (or dropped): re-arm and restart the stability timer
+        ac_restore_armed = true;
+        ac_restore_timing = false;
+    } else if (ac_restore_armed) {
+        if (!ac_restore_timing) {
+            ac_restore_timing = true;
+            ac_restore_start = time_get();
+            DEBUG("AC restore: waiting %d ms for stable power\n", AC_RESTORE_DELAY_MS);
+        } else if ((time_get() - ac_restore_start) >= AC_RESTORE_DELAY_MS) {
+            ac_restore_armed = false;
+            ac_restore_timing = false;
+            update_power_state();
+            if (power_state == POWER_STATE_OFF) {
+                DEBUG("AC restore power on\n");
+                power_on();
+            }
+        }
+    }
 
     gpio_set(&AC_PRESENT, !ac_new);
 
